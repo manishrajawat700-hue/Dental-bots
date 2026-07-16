@@ -1,14 +1,18 @@
-from groq import Groq
 import os
 import json
 import datetime
+from flask import Flask, request
+from groq import Groq
+from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 
 load_dotenv()
+
+app = Flask(__name__)
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 CLINIC_NAME = "Smile Care Dental Clinic"
-MODEL = "llama-3.3-70b-versatile"   # check console.groq.com/docs/models for current options
+MODEL = "llama-3.3-70b-versatile"
 
 SYSTEM_PROMPT = f"""You are the AI receptionist for {CLINIC_NAME}, a dental clinic in Indore.
 
@@ -27,70 +31,45 @@ YOUR JOB:
 3. Never confirm an appointment is booked — you only collect details. Say a staff member
    will call to confirm within a few hours.
 4. Keep every reply under 60 words. Be warm but efficient, like a good receptionist.
-5. In the beginning say welcome and ask how you can help. End every reply with a question or prompt for the patient to respond.
 
-
-STRICT RULES — SAY THIS INSTEAD OF GUESSING:
-- If asked for medical advice, diagnosis, or "does this sound serious": say you can't give
-  medical advice over chat and offer to book a checkup so the dentist can look at it.
-- If asked about insurance, discounts, or anything not in the price list: say you'll have
-  staff confirm and ask for their number.
-- If asked something totally unrelated to the clinic: politely redirect to how you can help
-  with clinic questions or booking.
-- If the person is rude or the message doesn't make sense: stay polite and calm, don't argue,
-  gently ask how you can help with a clinic-related question.
-- Never invent a price, a doctor's name, or a policy that wasn't given to you above.
+STRICT RULES:
+- If asked for medical advice or diagnosis: say you can't give medical advice over chat and offer to book a checkup.
+- If asked about insurance/discounts or anything not in the price list: say staff will confirm, ask for their number.
+- If asked something unrelated to the clinic: politely redirect to clinic questions or booking.
+- If the person is rude or unclear: stay calm, don't argue, ask how you can help.
+- Never invent a price, doctor's name, or policy not given above.
 """
 
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
+conversations = {}
 
-def new_log_path():
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(LOG_DIR, f"conversation_{ts}.jsonl")
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_reply():
+    incoming_msg = request.values.get("Body", "").strip()
+    sender = request.values.get("From", "")
 
-def log_turn(log_path, role, content):
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "role": role,
-            "content": content
-        }, ensure_ascii=False) + "\n")
+    if sender not in conversations:
+        conversations[sender] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-def main():
-    log_path = new_log_path()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    conversations[sender].append({"role": "user", "content": incoming_msg})
 
-    print(f"--- {CLINIC_NAME} AI Receptionist Demo ---")
-    print("(type 'quit' to end)\n")
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            max_tokens=300,
+            messages=conversations[sender],
+        )
+        reply_text = response.choices[0].message.content
+    except Exception as e:
+        reply_text = "Sorry, I'm having a technical issue right now — please call the clinic directly."
+        print(f"[error: {e}]")
 
-    while True:
-        user_input = input("Patient: ").strip()
-        if user_input.lower() in ("quit", "exit"):
-            break
-        if not user_input:
-            continue
+    conversations[sender].append({"role": "assistant", "content": reply_text})
 
-        messages.append({"role": "user", "content": user_input})
-        log_turn(log_path, "patient", user_input)
+    twiml = MessagingResponse()
+    twiml.message(reply_text)
+    return str(twiml)
 
-        try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                max_tokens=300,
-                messages=messages,
-            )
-            reply = response.choices[0].message.content
-        except Exception as e:
-            reply = "Sorry, I'm having a technical issue right now — please call the clinic directly."
-            print(f"[error: {e}]")
-
-        print(f"Receptionist: {reply}\n")
-        messages.append({"role": "assistant", "content": reply})
-        log_turn(log_path, "receptionist", reply)
-
-    print(f"\nConversation saved to: {log_path}")
-    print("Send this file (or a screenshot of it) to a clinic as proof it works.")
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
